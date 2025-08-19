@@ -1,0 +1,130 @@
+conda activate qiime2-amplicon-2023.9
+
+mkdir -p {01-raw,02-demultiplex,03-features,04-alignment,05-alpha,06-beta,07-taxa}
+
+qiime tools import \
+  --type 'SampleData[PairedEndSequencesWithQuality]' \
+  --input-path 01-raw/fastq_files \
+  --input-format CasavaOneEightSingleLanePerSampleDirFmt \
+  --output-path 02-demultiplex/demux-paired-end.qza
+
+qiime demux summarize \
+  --i-data 02-demultiplex/demux-paired-end.qza \
+  --o-visualization 02-demultiplex/demux-summary.qzv
+
+qiime dada2 denoise-paired \
+  --i-demultiplexed-seqs 02-demultiplex/demux-paired-end.qza \
+  --o-table 03-features/table.qza \
+  --o-representative-sequences 03-features/rep-seqs.qza \
+  --p-trim-left-f 5 \
+  --p-trim-left-r 5 \
+  --p-trunc-len-f 240 \
+  --p-trunc-len-r 160 \
+  --o-denoising-stats 03-features/denoising-stats.qza
+
+qiime feature-table summarize \
+  --i-table 03-features/table.qza \
+  --o-visualization 03-features/table.qzv \
+  --m-sample-metadata-file metadata.txt
+
+qiime feature-classifier classify-sklearn \
+  --i-classifier classifier-silva.qza \
+  --i-reads 03-features/rep-seqs.qza \
+  --o-classification 07-taxa/taxonomy.qza
+
+qiime taxa filter-table \
+  --i-table 03-features/table.qza \
+  --i-taxonomy 07-taxa/taxonomy.qza \
+  --p-exclude mitochondria,chloroplast \
+  --p-include p__ \
+  --o-filtered-table 03-features/filtered-table-taxa.qza
+
+qiime feature-table filter-features \
+  --i-table 03-features/filtered-table-taxa.qza \
+  --p-min-frequency 10 \
+  --o-filtered-table 03-features/filtered-table-freq.qza
+
+qiime feature-table filter-features \
+  --i-table 03-features/filtered-table-freq.qza \
+  --p-min-samples 2 \
+  --o-filtered-table 03-features/filtered-table-samples.qza
+
+qiime feature-table filter-samples \
+  --i-table 03-features/filtered-table-samples.qza \
+  --p-min-frequency 1000 \
+  --o-filtered-table 03-features/filtered-table.qza
+
+qiime alignment mafft \
+  --i-sequences 03-features/rep-seqs.qza \
+  --o-alignment 04-alignment/aligned-rep-seqs.qza
+
+qiime alignment mask \
+  --i-alignment 04-alignment/aligned-rep-seqs.qza \
+  --o-masked-alignment 04-alignment/masked-aligned-rep-seqs.qza
+
+qiime phylogeny fasttree \
+  --i-alignment 04-alignment/masked-aligned-rep-seqs.qza \
+  --o-tree 04-alignment/unrooted-tree.qza
+
+qiime phylogeny midpoint-root \
+  --i-tree 04-alignment/unrooted-tree.qza \
+  --o-rooted-tree 04-alignment/rooted-tree.qza
+
+qiime diversity core-metrics-phylogenetic \
+  --i-phylogeny 04-alignment/rooted-tree.qza \
+  --i-table 03-features/filtered-table.qza \
+  --p-sampling-depth 1000 \
+  --m-metadata-file metadata.txt \
+  --output-dir 06-beta
+
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity 06-beta/faith_pd_vector.qza \
+  --m-metadata-file metadata.txt \
+  --o-visualization 05-alpha/faith-pd-significance.qzv
+
+qiime diversity alpha-group-significance \
+  --i-alpha-diversity 06-beta/shannon_vector.qza \
+  --m-metadata-file metadata.txt \
+  --o-visualization 05-alpha/shannon-significance.qzv
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix 06-beta/unweighted_unifrac_distance_matrix.qza \
+  --m-metadata-file metadata.txt \
+  --m-metadata-column group \
+  --o-visualization 06-beta/unweighted-unifrac-significance.qzv
+
+qiime diversity beta-group-significance \
+  --i-distance-matrix 06-beta/weighted_unifrac_distance_matrix.qza \
+  --m-metadata-file metadata.txt \
+  --m-metadata-column group \
+  --o-visualization 06-beta/weighted-unifrac-significance.qzv
+
+qiime taxa barplot \
+  --i-table 03-features/filtered-table.qza \
+  --i-taxonomy 07-taxa/taxonomy.qza \
+  --m-metadata-file metadata.txt \
+  --o-visualization 07-taxa/taxa-bar-plots.qzv
+
+qiime feature-table relative-frequency \
+  --i-table 03-features/filtered-table.qza \
+  --o-relative-frequency-table 07-taxa/relative-table.qza
+
+qiime tools export \
+  --input-path 07-taxa/relative-table.qza \
+  --output-path 07-taxa/exported
+
+qiime tools export \
+  --input-path 07-taxa/taxonomy.qza \
+  --output-path 07-taxa/exported
+
+biom add-metadata \
+  --input-fp 07-taxa/exported/feature-table.biom \
+  --observation-metadata-fp 07-taxa/exported/taxonomy.tsv \
+  --sc-separated taxonomy \
+  --output-fp 07-taxa/exported/feature-table-with-taxonomy.biom
+
+biom convert \
+  --input-fp 07-taxa/exported/feature-table-with-taxonomy.biom \
+  --output-fp 07-taxa/exported/feature-table-with-taxonomy.tsv \
+  --to-tsv \
+  --header-key taxonomy
