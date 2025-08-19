@@ -1,0 +1,22 @@
+rm(list=ls())
+
+library(Maaslin2)
+
+df_input_data = read.table("input_data.txt", header = TRUE, sep = "\t",
+                           row.names = 1,
+                           stringsAsFactors = FALSE)
+
+df_input_data <- Filter(function(x) any(!is.na(x)), df_input_data)
+
+df_input_metadata = read.table("metadata.txt", header = TRUE, sep = "\t",
+                               row.names = 1,
+                               stringsAsFactors = FALSE)
+
+fit_data = Maaslin2(
+  input_data = df_input_data,
+  input_metadata = df_input_metadata,
+  output = "maaslin_results",
+  fixed_effects = c('age','treatment','sex','score'),
+  max_significance = 1,
+  standardize = FALSE,
+  cores = 8)
