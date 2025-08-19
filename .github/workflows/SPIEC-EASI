@@ -1,0 +1,114 @@
+library(tximport)
+library(DESeq2)
+library(readxl)
+library(biomaRt)
+library(tidyverse)
+library(BiocParallel)
+library(SpiecEasi)
+library(igraph)
+
+register(MulticoreParam(14))
+
+mart <- useEnsembl(biomart = "ensembl", dataset="hsapiens_gene_ensembl", host="https://www.ensembl.org")
+
+txinfo <- getBM(attributes = c('ensembl_transcript_id_version', 'ensembl_transcript_id', 
+                               'ensembl_gene_id', 'external_transcript_name', 'external_gene_name'),
+                mart = mart) %>%
+  as_tibble() %>%
+  mutate(noVersion = sub('\\..*', '', ensembl_transcript_id_version))
+
+tx2gene0 <- txinfo %>% dplyr::select(noVersion, external_gene_name) %>%
+  rename(c('Transcript' = "noVersion" , "Gene0" = "external_gene_name" )) %>%
+  data.frame()
+
+tx2gene0$Gene <- with(tx2gene0, ifelse(Gene0 == "", Transcript, Gene0))
+tx2gene <- tx2gene0[-grep("Gene0", names(tx2gene0))]
+rm(tx2gene0)
+
+dir <- "path/to/analysis/"
+setwd(dir)
+
+process_cell_type <- function(pattern, cell_name) {
+  sampleFiles <- grep(pattern, list.files(dir), value=TRUE)
+  sampleCell <- sub(".*_(.*)_.*_.*","\\1",sampleFiles)
+  samplesSex <- sub(".*_.*_.*_(.*)","\\1",sampleFiles)
+  sampleCondition <- as.numeric(as.character(sub(".*_.*_(.*)_.*","\\1",sampleFiles)))
+  sampleReplicate <- sub("(.*)_.*_.*_.*","\\1",sampleFiles)
+  
+  sampleTable <- data.frame(sampleName = sampleFiles, celltype = sampleCell,
+                           patient = sampleReplicate, sex = samplesSex,
+                           LME = sampleCondition)
+  
+  files <- file.path(dir, sampleTable$sampleName, "quant.sf")
+  names(files) <- sampleTable$sampleName
+  
+  txi.salmon <- tximport(files, type = "salmon", tx2gene = tx2gene, ignoreTxVersion = T)
+  ddsTxi <- DESeqDataSetFromTximport(txi.salmon, colData = sampleTable, design = ~ sex + LME)
+  
+  keep <- rowSums(counts(ddsTxi)>=10) >= round(0.4*length(sampleFiles),0)
+  ddsTxi <- ddsTxi[keep,]
+  
+  dds <- DESeq(ddsTxi)
+  dds2 <- estimateSizeFactors(dds)
+  counts_norm <- counts(dds2, normalized = T)
+  
+  vsd <- vst(dds, blind = F)
+  plotPCA(vsd, intgroup="LME", ntop = 500) + 
+    geom_text(aes(label=vsd$patient), hjust=1.7) + 
+    ggtitle(paste(cell_name, "PCA"))
+  
+  return(list(counts = counts_norm, dds = dds, vsd = vsd))
+}
+
+ncm_results <- process_cell_type(".*_NCM_.*_.*", "NCM")
+dds3_NCM <- ncm_results$counts
+
+colnames(dds3_NCM) <- c("P1","P10","P13","P14","P16","P17","P2","P3","P4","P5","P6","P8","P9")
+dds3_NCM <- dds3_NCM[, c(7:13,2:6,1)]
+
+setwd("path/to/microbiome/")
+microbiome <- as.data.frame(read_excel("microbiome_data.xlsx"))
+row.names(microbiome) <- microbiome$...1
+microbiome <- microbiome[2:14]
+
+run_network_analysis <- function(rna_data, microbiome_data, cell_type) {
+  rna_filtered <- rna_data[rowSums(rna_data) >= 10, ]
+  rna_normalized <- log2(rna_filtered + 1)
+  
+  input_data <- list(RNAseq = t(rna_normalized), Microbiome = t(microbiome_data))
+  
+  se <- spiec.easi(input_data, method = "mb", lambda.min.ratio = 0.1,
+                   nlambda = 50, pulsar.params = list(thresh = 0.05))
+  
+  net <- adj2igraph(getRefit(se))
+  net <- simplify(net, remove.multiple = FALSE, remove.loops = TRUE)
+  
+  node_names <- c(row.names(rna_normalized), row.names(microbiome_data))
+  V(net)$name <- node_names
+  
+  node_colors <- c(rep("skyblue", nrow(rna_normalized)), rep("salmon", nrow(microbiome_data)))
+  V(net)$color <- node_colors
+  V(net)$size <- rep(15, length(node_names))
+  
+  plot(net, vertex.label = V(net)$name, vertex.label.cex = 0.7,
+       vertex.label.color = "black", vertex.size = V(net)$size,
+       vertex.color = V(net)$color, edge.color = "gray",
+       main = paste(cell_type, "Genes vs Microbiome Network"))
+  
+  edge_list <- as_edgelist(net)
+  edge_weights <- E(net)$weight
+  
+  if(length(edge_weights) > 0) {
+    significant_edges <- data.frame(
+      Feature1 = colnames(input_data$RNAseq)[edge_list[,1]],
+      Feature2 = colnames(input_data$Microbiome)[edge_list[,2]],
+      Weight = edge_weights
+    )
+    significant_edges <- significant_edges[abs(significant_edges$Weight) > 0.3,]
+    write.csv(significant_edges, paste0(tolower(cell_type), "_microbiome_edges.csv"))
+  }
+  
+  return(list(network = net, spiec_easi = se))
+}
+
+ncm_network <- run_network_analysis(dds3_NCM, microbiome, "NCM")
